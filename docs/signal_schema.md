@@ -1,0 +1,7 @@
+# TradingView Signal Schema
+
+The supplied Pine source is preserved unchanged at `pine/mayur_vdbt_rr_original.pine`. `pine/mayur_vdbt_rr_v1.pine` changes only the alert message construction and emits schema version 1. The receiver remains backward-compatible with the original six-key payload.
+
+V1 adds `schema_version`, `strategy_id`, `strategy_version`, `event_type`, `timeframe`, `reference_instrument`, `price_unit`, `bar_time_epoch_ms`, `emitted_at_epoch_ms`, and `target_price`. Times are UNIX milliseconds. `bar_time_epoch_ms` is the opening time of the breakout/alert bar; `emitted_at_epoch_ms` uses Pine `timenow`. Levels use `CHART_SYMBOL` and `CHART_PRICE`; they are not option premiums. Stable `alert_id` continues to use ticker, timeframe, breakout-bar time and direction. No secret or credential is embedded in the payload.
+
+The receiver authenticates through a high-entropy secret URL path, validates fields and directional level ordering, persists the validated body without the URL secret, rejects oversized bodies, and audits invalid input. Timestamp presence does not itself enable stale rejection: max age, allowed clock skew and behavior on delayed TradingView delivery remain unset. Alert timing remains unchanged from the source: first intrabar touch of the immediate next bar can emit once per bar; no close-confirmation condition was added. TradingView alert runtime parity must be verified in the user's account before relying on it.

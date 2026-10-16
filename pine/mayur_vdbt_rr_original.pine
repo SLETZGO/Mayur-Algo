@@ -1,0 +1,830 @@
+//@version=6
+
+import TradingView/ta/8
+
+strategy("MAYUR's Vol/Delta + CVD Progressive RR",
+
+     shorttitle="MAYUR VDBT RR",
+
+     overlay=true,
+
+     pyramiding=0,
+
+     initial_capital=100000,
+
+     default_qty_type=strategy.fixed,
+
+     default_qty_value=1,
+
+     commission_type=strategy.commission.percent,
+
+     commission_value=0.05,
+
+     slippage=1,
+
+     process_orders_on_close=true,
+     calc_on_every_tick=true)
+
+// HARD RESTRICTION: this strategy is designed to run on 5-minute candles only.
+isFiveMinuteChart = timeframe.isminutes and timeframe.multiplier == 5
+if barstate.isfirst and not isFiveMinuteChart
+    runtime.error("MAYUR VDBT RR works on the 5-minute chart only. Change chart timeframe to 5 minutes.")
+
+//====================================================
+
+// 1. VOLUME DATA
+
+//====================================================
+
+useCustomTF = input.bool(false, "Use custom timeframe", group="Volume")
+
+customTF = input.timeframe("1", "Lower timeframe", group="Volume")
+
+lowerTF = useCustomTF ? customTF :
+
+     timeframe.isseconds ? "1S" :
+
+     timeframe.isintraday ? "1" :
+
+     timeframe.isdaily ? "5" : "60"
+
+[upVolume, downVolume, delta] = ta.requestUpAndDownVolume(lowerTF)
+
+isRed = upVolume == 0
+
+isGreen = not isRed and downVolume == 0
+
+bgcolor(isRed ? color.new(color.red, 80) :
+
+     isGreen ? color.new(color.green, 80) : na,
+
+     title="Signal Highlights")
+
+plot(upVolume, "Up Volume",
+
+     color=color.new(color.green, 60),
+
+     display=display.data_window)
+
+plot(downVolume, "Down Volume",
+
+     color=color.new(color.red, 60),
+
+     display=display.data_window)
+
+plot(delta, "Delta",
+
+     color=delta >= 0 ? color.green : color.red,
+
+     display=display.data_window)
+
+//====================================================
+
+// 2. TRADE SETTINGS
+
+//====================================================
+
+oneSignalPerDay = input.bool(
+
+     true, "Only first highlighted candle per day",
+
+     group="Trade Management")
+
+allowLong = input.bool(
+
+     true, "Enable long trades",
+
+     group="Trade Management")
+
+allowShort = input.bool(
+
+     true, "Enable short trades",
+
+     group="Trade Management")
+
+showLevels = input.bool(
+
+     true, "Show Entry and Stop Loss", group="Display")
+
+showRR1 = input.bool(true, "Show 1:1 target", group="Target Lines")
+
+showRR15 = input.bool(true, "Show 1:1.5 target", group="Target Lines")
+
+showRR2 = input.bool(true, "Show 1:2 target", group="Target Lines")
+
+showRR3 = input.bool(true, "Show 1:3 target", group="Target Lines")
+
+showDashboard = input.bool(
+
+     true, "Show today's trade dashboard", group="Display")
+
+// Final strategy exit: stop loss or 3R target.
+
+finalRR = 3.0
+
+//====================================================
+
+// 3. DAILY CVD CALCULATION
+
+//====================================================
+
+newDay = timeframe.change("D")
+
+var float cvd = 0.0
+
+if newDay
+
+    cvd := nz(delta)
+
+else
+
+    cvd += nz(delta)
+
+cvdPositive = cvd > 0
+
+cvdNegative = cvd < 0
+
+//====================================================
+
+// 4. TRADE AND DASHBOARD VARIABLES
+
+//====================================================
+
+var bool signalUsedToday = false
+
+if newDay
+
+    signalUsedToday := false
+
+var float entryPrice = na
+
+var float stopPrice = na
+
+var float targetPrice = na
+
+var int signalBar = na
+
+var int signalDirection = 0
+
+var bool orderPending = false
+var bool entryConfirmed = false
+
+// Today's dashboard values persist after a trade closes.
+
+var float todayEntryPrice = na
+
+var float todayStopPrice = na
+
+var int todayDirection = 0
+
+var string rewardStatus = "NO TRADE"
+
+// Reset today's dashboard at the next daily session.
+
+if newDay
+
+    todayEntryPrice := na
+
+    todayStopPrice := na
+
+    todayDirection := 0
+
+    rewardStatus := "NO TRADE"
+
+// Entries are not submitted on the highlighted candle.
+// If the immediately following candle closes without breaking the level,
+// expire the setup before another candle can trigger it.
+if orderPending and strategy.position_size == 0 and
+     not na(signalBar) and bar_index == signalBar + 1 and
+     barstate.isconfirmed and
+     not ((signalDirection == 1 and high >= entryPrice) or
+          (signalDirection == -1 and low <= entryPrice))
+    orderPending := false
+    entryConfirmed := false
+    entryPrice := na
+    stopPrice := na
+    targetPrice := na
+    signalBar := na
+    signalDirection := 0
+    if rewardStatus == "ENTRY PENDING"
+        rewardStatus := "ENTRY EXPIRED"
+
+// Mark entry order as filled.
+if strategy.position_size != 0
+    orderPending := false
+
+//====================================================
+
+// 5. ENTRY CONDITIONS
+
+//====================================================
+
+firstHighlight = isFiveMinuteChart and barstate.isconfirmed and
+
+     (isGreen or isRed) and
+
+     high > low and
+
+     strategy.position_size == 0 and
+
+     not orderPending and
+
+     na(signalBar) and
+
+     (not oneSignalPerDay or not signalUsedToday)
+
+longEntrySignal = firstHighlight and
+
+     isGreen and cvdPositive and allowLong
+
+shortEntrySignal = firstHighlight and
+
+     isRed and cvdNegative and allowShort
+
+if firstHighlight
+
+    if oneSignalPerDay
+
+        signalUsedToday := true
+
+    // LONG: green highlight + positive daily CVD.
+
+    if longEntrySignal
+
+        entryPrice := high
+
+        stopPrice := low
+
+        todayEntryPrice := entryPrice
+
+        todayStopPrice := stopPrice
+
+        todayDirection := 1
+
+        rewardStatus := "ENTRY PENDING"
+
+        risk = entryPrice - stopPrice
+
+        targetPrice := entryPrice + risk * finalRR
+
+        signalBar := bar_index
+
+        signalDirection := 1
+
+        orderPending := true
+        entryConfirmed := false
+
+        // Wait for the next 5-minute candle to break this level.
+
+    // SHORT: red highlight + negative daily CVD.
+
+    else if shortEntrySignal
+
+        entryPrice := low
+
+        stopPrice := high
+
+        todayEntryPrice := entryPrice
+
+        todayStopPrice := stopPrice
+
+        todayDirection := -1
+
+        rewardStatus := "ENTRY PENDING"
+
+        risk = stopPrice - entryPrice
+
+        targetPrice := entryPrice - risk * finalRR
+
+        signalBar := bar_index
+
+        signalDirection := -1
+
+        orderPending := true
+        entryConfirmed := false
+
+        // Wait for the next 5-minute candle to break this level.
+
+// Keep the protective exit active while in a position.
+
+if strategy.position_size > 0 and not na(stopPrice)
+
+    strategy.exit(
+
+         "Long Exit",
+
+         from_entry="Long",
+
+         stop=stopPrice,
+
+         limit=targetPrice)
+
+if strategy.position_size < 0 and not na(stopPrice)
+
+    strategy.exit(
+
+         "Short Exit",
+
+         from_entry="Short",
+
+         stop=stopPrice,
+
+         limit=targetPrice)
+
+//====================================================
+// 5A. NEXT-CANDLE BREAKOUT CONFIRMATION + WEBHOOK ALERTS
+// Alert only if the candle immediately after the highlighted candle breaks its level.
+// If not crossed by that candle's close, the pending entry is cancelled and the day is done.
+//====================================================
+
+longNextBarBreakout = isFiveMinuteChart and orderPending and
+     not entryConfirmed and signalDirection == 1 and
+     not na(signalBar) and bar_index == signalBar + 1 and
+     high >= entryPrice
+
+shortNextBarBreakout = isFiveMinuteChart and orderPending and
+     not entryConfirmed and signalDirection == -1 and
+     not na(signalBar) and bar_index == signalBar + 1 and
+     low <= entryPrice
+
+if longNextBarBreakout and strategy.position_size == 0
+    entryConfirmed := true
+    orderPending := false
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", from_entry="Long", stop=stopPrice,
+         limit=targetPrice)
+    alert(
+         "{\"alert_id\":\"" + syminfo.tickerid + "-5-" + str.tostring(time) + "-LONG\",\"action\":\"LONG\",\"underlying\":\"" + syminfo.tickerid + "\",\"entry_trigger\":" + str.tostring(entryPrice, format.mintick) + ",\"sl_underlying\":" + str.tostring(stopPrice, format.mintick) + ",\"rr\":3.0}",
+         alert.freq_once_per_bar)
+
+if shortNextBarBreakout and strategy.position_size == 0
+    entryConfirmed := true
+    orderPending := false
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=stopPrice,
+         limit=targetPrice)
+    alert(
+         "{\"alert_id\":\"" + syminfo.tickerid + "-5-" + str.tostring(time) + "-SHORT\",\"action\":\"SHORT\",\"underlying\":\"" + syminfo.tickerid + "\",\"entry_trigger\":" + str.tostring(entryPrice, format.mintick) + ",\"sl_underlying\":" + str.tostring(stopPrice, format.mintick) + ",\"rr\":3.0}",
+         alert.freq_once_per_bar)
+
+// If the immediate next candle closes without a breakout, expire the setup.
+// This prevents a later candle from producing an entry or alert.
+if orderPending and strategy.position_size == 0 and
+     not na(signalBar) and bar_index == signalBar + 1 and
+     barstate.isconfirmed and not entryConfirmed
+    orderPending := false
+    entryPrice := na
+    stopPrice := na
+    targetPrice := na
+    signalBar := na
+    signalDirection := 0
+    entryConfirmed := false
+    if rewardStatus == "ENTRY PENDING"
+        rewardStatus := "ENTRY EXPIRED"
+
+// 6. ACTIVE ENTRY, SL AND TARGET LINES
+
+//====================================================
+
+levelsVisible = showLevels and
+
+     (entryConfirmed or strategy.position_size != 0)
+
+riskDistance = not na(entryPrice) and not na(stopPrice) ?
+
+     math.abs(entryPrice - stopPrice) : na
+
+longSide = signalDirection == 1
+
+shortSide = signalDirection == -1
+
+target1 = not na(riskDistance) ?
+
+     (longSide ? entryPrice + riskDistance :
+
+     shortSide ? entryPrice - riskDistance : na) : na
+
+target15 = not na(riskDistance) ?
+
+     (longSide ? entryPrice + riskDistance * 1.5 :
+
+     shortSide ? entryPrice - riskDistance * 1.5 : na) : na
+
+target2 = not na(riskDistance) ?
+
+     (longSide ? entryPrice + riskDistance * 2.0 :
+
+     shortSide ? entryPrice - riskDistance * 2.0 : na) : na
+
+target3 = not na(riskDistance) ?
+
+     (longSide ? entryPrice + riskDistance * 3.0 :
+
+     shortSide ? entryPrice - riskDistance * 3.0 : na) : na
+
+plot(
+
+     levelsVisible ? entryPrice : na,
+
+     "Entry",
+
+     color=color.blue,
+
+     linewidth=2,
+
+     style=plot.style_linebr)
+
+plot(
+
+     levelsVisible ? stopPrice : na,
+
+     "Stop Loss",
+
+     color=color.red,
+
+     linewidth=2,
+
+     style=plot.style_linebr)
+
+plot(
+
+     levelsVisible and showRR1 ? target1 : na,
+
+     "Target 1:1",
+
+     color=color.green,
+
+     linewidth=2,
+
+     style=plot.style_linebr)
+
+plot(
+
+     levelsVisible and showRR15 ? target15 : na,
+
+     "Target 1:1.5",
+
+     color=color.teal,
+
+     linewidth=2,
+
+     style=plot.style_linebr)
+
+plot(
+
+     levelsVisible and showRR2 ? target2 : na,
+
+     "Target 1:2",
+
+     color=color.orange,
+
+     linewidth=2,
+
+     style=plot.style_linebr)
+
+plot(
+
+     levelsVisible and showRR3 ? target3 : na,
+
+     "Target 1:3",
+
+     color=color.purple,
+
+     linewidth=2,
+
+     style=plot.style_linebr)
+
+// Display LONG/SHORT only on the immediate breakout-confirmation candle.
+plotshape(
+     longNextBarBreakout,
+     title="Long Breakout Confirmed",
+     style=shape.triangleup,
+     location=location.belowbar,
+     color=color.green,
+     size=size.small,
+     text="LONG")
+
+plotshape(
+     shortNextBarBreakout,
+     title="Short Breakout Confirmed",
+     style=shape.triangledown,
+     location=location.abovebar,
+     color=color.red,
+     size=size.small,
+     text="SHORT")
+
+//====================================================
+
+// 7. TODAY'S TARGET PRICE AND PERCENTAGE CALCULATIONS
+
+//====================================================
+
+todayRisk = not na(todayEntryPrice) and not na(todayStopPrice) ?
+
+     math.abs(todayEntryPrice - todayStopPrice) : na
+
+todaySLPct = not na(todayRisk) and todayEntryPrice != 0 ?
+
+     todayRisk / todayEntryPrice * 100 : na
+
+todayT1 = not na(todayRisk) ?
+
+     todayEntryPrice + todayDirection * todayRisk : na
+
+todayT15 = not na(todayRisk) ?
+
+     todayEntryPrice + todayDirection * todayRisk * 1.5 : na
+
+todayT2 = not na(todayRisk) ?
+
+     todayEntryPrice + todayDirection * todayRisk * 2.0 : na
+
+todayT3 = not na(todayRisk) ?
+
+     todayEntryPrice + todayDirection * todayRisk * 3.0 : na
+
+todayT1Pct = not na(todayRisk) and todayEntryPrice != 0 ?
+
+     todayRisk / todayEntryPrice * 100 : na
+
+todayT15Pct = not na(todayRisk) and todayEntryPrice != 0 ?
+
+     todayRisk * 1.5 / todayEntryPrice * 100 : na
+
+todayT2Pct = not na(todayRisk) and todayEntryPrice != 0 ?
+
+     todayRisk * 2.0 / todayEntryPrice * 100 : na
+
+todayT3Pct = not na(todayRisk) and todayEntryPrice != 0 ?
+
+     todayRisk * 3.0 / todayEntryPrice * 100 : na
+
+//====================================================
+
+// 8. PROGRESSIVE REWARD STATUS
+
+//====================================================
+
+if strategy.position_size > 0 and not na(todayEntryPrice)
+
+    if high >= todayT3
+
+        rewardStatus := "1:3 HIT"
+
+    else if high >= todayT2 and rewardStatus != "1:3 HIT"
+
+        rewardStatus := "1:2 HIT"
+
+    else if high >= todayT15 and
+
+         rewardStatus != "1:2 HIT" and
+
+         rewardStatus != "1:3 HIT"
+
+        rewardStatus := "1:1.5 HIT"
+
+    else if high >= todayT1 and rewardStatus == "IN TRADE"
+
+        rewardStatus := "1:1 HIT"
+
+    else if rewardStatus == "ENTRY PENDING"
+
+        rewardStatus := "IN TRADE"
+
+if strategy.position_size < 0 and not na(todayEntryPrice)
+
+    if low <= todayT3
+
+        rewardStatus := "1:3 HIT"
+
+    else if low <= todayT2 and rewardStatus != "1:3 HIT"
+
+        rewardStatus := "1:2 HIT"
+
+    else if low <= todayT15 and
+
+         rewardStatus != "1:2 HIT" and
+
+         rewardStatus != "1:3 HIT"
+
+        rewardStatus := "1:1.5 HIT"
+
+    else if low <= todayT1 and rewardStatus == "IN TRADE"
+
+        rewardStatus := "1:1 HIT"
+
+    else if rewardStatus == "ENTRY PENDING"
+
+        rewardStatus := "IN TRADE"
+
+// Detect when a trade closes.
+
+closedTradeNow = ta.change(strategy.closedtrades) > 0
+
+if closedTradeNow and strategy.closedtrades > 0
+
+    lastExitPrice = strategy.closedtrades.exit_price(
+
+         strategy.closedtrades - 1)
+
+    priceTolerance = syminfo.mintick * 2
+
+    exitAtSL = not na(todayStopPrice) and
+
+         math.abs(lastExitPrice - todayStopPrice) <= priceTolerance
+
+    exitAtFinalTarget = not na(todayT3) and
+
+         math.abs(lastExitPrice - todayT3) <= priceTolerance
+
+    if exitAtFinalTarget
+
+        rewardStatus := "1:3 HIT"
+
+    else if exitAtSL and
+
+         (rewardStatus == "ENTRY PENDING" or
+
+         rewardStatus == "IN TRADE")
+
+        rewardStatus := "SL HIT"
+
+// Clear active chart levels after a trade closes.
+
+if closedTradeNow and strategy.position_size == 0
+
+    entryPrice := na
+
+    stopPrice := na
+
+    targetPrice := na
+
+    signalBar := na
+
+    signalDirection := 0
+
+    orderPending := false
+
+//====================================================
+
+// 9. TODAY'S TRADE DASHBOARD
+
+// Final Exit row removed.
+
+//====================================================
+
+var table dash = table.new(
+
+     position.top_right, 2, 9, border_width=1)
+
+if barstate.islast
+
+    if showDashboard
+
+        table.cell(
+
+             dash, 0, 0, "TODAY'S TRADE",
+
+             text_color=color.white,
+
+             bgcolor=color.rgb(35, 45, 65))
+
+        table.cell(
+
+             dash, 1, 0, "PRICE / %",
+
+             text_color=color.white,
+
+             bgcolor=color.rgb(35, 45, 65))
+
+        table.cell(dash, 0, 1, "Direction")
+
+        table.cell(
+
+             dash, 1, 1,
+
+             todayDirection == 1 ? "LONG" :
+
+             todayDirection == -1 ? "SHORT" : "NO TRADE",
+
+             text_color=todayDirection == 1 ? color.green :
+
+             todayDirection == -1 ? color.red : color.gray)
+
+        table.cell(dash, 0, 2, "Entry")
+
+        table.cell(
+
+             dash, 1, 2,
+
+             na(todayEntryPrice) ? "--" :
+
+             str.tostring(todayEntryPrice, format.mintick))
+
+        table.cell(dash, 0, 3, "Stop Loss")
+
+        table.cell(
+
+             dash, 1, 3,
+
+             na(todayStopPrice) ? "--" :
+
+             str.tostring(todayStopPrice, format.mintick) +
+
+             " (-" + str.tostring(todaySLPct, "#.##") + "%)",
+
+             text_color=color.red)
+
+        table.cell(dash, 0, 4, "Target 1:1")
+
+        table.cell(
+
+             dash, 1, 4,
+
+             na(todayT1) ? "--" :
+
+             str.tostring(todayT1, format.mintick) +
+
+             " (+" + str.tostring(todayT1Pct, "#.##") + "%)",
+
+             text_color=color.green)
+
+        table.cell(dash, 0, 5, "Target 1:1.5")
+
+        table.cell(
+
+             dash, 1, 5,
+
+             na(todayT15) ? "--" :
+
+             str.tostring(todayT15, format.mintick) +
+
+             " (+" + str.tostring(todayT15Pct, "#.##") + "%)",
+
+             text_color=color.teal)
+
+        table.cell(dash, 0, 6, "Target 1:2")
+
+        table.cell(
+
+             dash, 1, 6,
+
+             na(todayT2) ? "--" :
+
+             str.tostring(todayT2, format.mintick) +
+
+             " (+" + str.tostring(todayT2Pct, "#.##") + "%)",
+
+             text_color=color.orange)
+
+        table.cell(dash, 0, 7, "Target 1:3")
+
+        table.cell(
+
+             dash, 1, 7,
+
+             na(todayT3) ? "--" :
+
+             str.tostring(todayT3, format.mintick) +
+
+             " (+" + str.tostring(todayT3Pct, "#.##") + "%)",
+
+             text_color=color.purple)
+
+        table.cell(dash, 0, 8, "Reward Status")
+
+        table.cell(
+
+             dash, 1, 8, rewardStatus,
+
+             text_color=rewardStatus == "SL HIT" ? color.red :
+
+             rewardStatus == "1:3 HIT" ? color.purple :
+
+             rewardStatus == "1:2 HIT" ? color.orange :
+
+             rewardStatus == "1:1.5 HIT" ? color.teal :
+
+             rewardStatus == "1:1 HIT" ? color.green :
+
+             color.gray)
+
+    else
+
+        table.clear(dash, 0, 0, 1, 8)
+
+//====================================================
+
+// 10. VOLUME VALIDATION
+
+//====================================================
+
+var float cumulativeVolume = 0.0
+
+cumulativeVolume += nz(volume)
+
+if barstate.islast and cumulativeVolume == 0
+
+    runtime.error(
+
+         "The data vendor does not provide volume data for this symbol.")

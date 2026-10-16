@@ -1,0 +1,22 @@
+app:
+  timezone_display: Asia/Kolkata
+  execution_mode: PAPER
+  live_trading_enabled: false
+  require_manual_live_arming: true
+
+strategy:
+  strategy_id: mayur_vdbt_rr
+  timeframe: "5"
+  # Symbol, alert timing, and options mapping require user confirmation.
+
+options:
+  expiry_policy: null
+  strike_policy: null
+
+exits:
+  exit_model: null
+  allow_trailing: false
+
+broker:
+  provider: FYERS
+  live_orders_enabled: false

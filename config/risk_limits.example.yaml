@@ -1,0 +1,6 @@
+# Values intentionally unset until supplied and reviewed. Never infer a risk budget.
+max_risk_per_trade_inr: null
+max_daily_loss_inr: null
+max_lots: 1
+max_open_positions: 1
+max_trades_per_day: 1
